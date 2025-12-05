@@ -564,10 +564,11 @@ app.get("/api/live/summary", async (req, res) => {
 
 // ✅ Live activity using Neynar Hub (no Postgres)
 // ✅ Live activity using Neynar (with real engagement counts)
+// Live activity endpoint – uses Hub API only (no paid Neynar casts endpoints)
 app.get("/api/live/activity", async (req, res) => {
   try {
     const fidParam = req.query.fid;
-    const fid = typeof fidParam === "string" ? Number(fidParam) : NaN;
+    const fid = fidParam ? Number(fidParam) : NaN;
 
     if (!fid || Number.isNaN(fid)) {
       return res.status(400).json({
@@ -576,103 +577,50 @@ app.get("/api/live/activity", async (req, res) => {
       });
     }
 
-    // Optional: ?days= (default 7, clamp between 1 and 30)
-    const daysParam = req.query.days;
-    let daysWindow =
-      typeof daysParam === "string" ? parseInt(daysParam, 10) || 7 : 7;
-    if (daysWindow < 1) daysWindow = 1;
-    if (daysWindow > 30) daysWindow = 30;
+    // 1) Fetch recent casts from Hub
+    const casts = await fetchCastsByFidFromHub(fid);
 
-    // 1) Fetch recent casts from Neynar main API (same source as /api/debug/casts)
-    const raw = (await fetchCastsByFid(fid, 200)) as any;
-
-    let casts: any[] = [];
-    if (Array.isArray(raw.casts)) {
-      casts = raw.casts;
-    } else if (Array.isArray(raw.result?.casts)) {
-      casts = raw.result.casts;
-    }
-
-    // 2) Set up day buckets for the last N days
+    // 2) Build a 7-day window (oldest -> newest)
     const now = new Date();
-    now.setHours(0, 0, 0, 0);
+    const daysMap: Record<
+      string,
+      { date: string; postCount: number; engagements: number }
+    > = {};
 
-    const start = new Date(now);
-    start.setDate(now.getDate() - (daysWindow - 1));
-
-    type DayBucket = {
-      date: string;        // ISO string for frontend
-      postCount: number;   // how many casts that day
-      engagements: number; // likes + recasts + replies that day
-    };
-
-    const dayBuckets: Record<string, DayBucket> = {};
-
-    // Initialize all days in the window
-    for (let i = 0; i < daysWindow; i++) {
-      const d = new Date(start);
-      d.setDate(start.getDate() + i);
-
-      const dateOnly = d.toISOString().slice(0, 10); // "YYYY-MM-DD"
-      dayBuckets[dateOnly] = {
-        date: d.toISOString(),
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(now);
+      d.setDate(now.getDate() - (6 - i)); // 6 days ago ... today
+      const iso = d.toISOString().slice(0, 10); // YYYY-MM-DD
+      daysMap[iso] = {
+        date: iso,
         postCount: 0,
         engagements: 0,
       };
     }
 
-    // Helper: convert timestamp → Date
-    function tsToDate(t: any): Date | null {
-      if (!t) return null;
-
-      if (typeof t === "number") {
-        // If small, treat as Unix seconds
-        const ms = t < 10_000_000_000 ? t * 1000 : t;
-        const d = new Date(ms);
-        return isNaN(d.getTime()) ? null : d;
-      }
-
-      if (typeof t === "string") {
-        const d = new Date(t);
-        return isNaN(d.getTime()) ? null : d;
-      }
-
-      return null;
-    }
-
-    // 3) Fill buckets from casts
+    // 3) Bucket casts into those days
     casts.forEach((c: any) => {
-      const dt = tsToDate(c.timestamp);
-      if (!dt) return;
+      if (!c.timestamp) return;
 
-      dt.setHours(0, 0, 0, 0);
-      const dateOnly = dt.toISOString().slice(0, 10);
+      const ts = new Date(c.timestamp);
+      const dayKey = ts.toISOString().slice(0, 10);
 
-      const bucket = dayBuckets[dateOnly];
-      if (!bucket) {
-        // cast is outside the N-day window → ignore
-        return;
-      }
+      if (!daysMap[dayKey]) return;
 
-      bucket.postCount += 1;
-
-      // Real engagement counts (if present)
-      const likes = c.reactions?.likes_count ?? 0;
-      const recasts = c.reactions?.recasts_count ?? 0;
-      const replies = c.replies?.count ?? 0;
-
-      bucket.engagements += likes + recasts + replies;
+      // For now, we don't have real engagement counts from Hub,
+      // so we set engagements = 0 or 1 as a placeholder.
+      daysMap[dayKey].postCount += 1;
+      // Placeholder: 0 engagements per cast – can be enhanced later if you
+      // start pulling reactions from Neynar or another source.
+      daysMap[dayKey].engagements += 0;
     });
 
-    // 4) Convert map → sorted array
-    const days = Object.keys(dayBuckets)
-      .sort()
-      .map((k) => dayBuckets[k]);
+    const days = Object.values(daysMap);
 
     return res.json({
       ok: true,
       fid,
-      range: `${daysWindow}d`,
+      range: "7d",
       days,
     });
   } catch (err: any) {
@@ -684,6 +632,7 @@ app.get("/api/live/activity", async (req, res) => {
     });
   }
 });
+
 
 
 
